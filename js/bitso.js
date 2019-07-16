@@ -3,7 +3,7 @@
 //  ---------------------------------------------------------------------------
 
 const Exchange = require ('./base/Exchange');
-const { ExchangeError, InvalidNonce, AuthenticationError, OrderNotFound } = require ('./base/errors');
+const { ExchangeError, InvalidNonce, AuthenticationError, OrderNotFound, InvalidOrder, DDoSProtection } = require ('./base/errors');
 
 //  ---------------------------------------------------------------------------
 
@@ -86,6 +86,15 @@ module.exports = class bitso extends Exchange {
             'exceptions': {
                 '0201': AuthenticationError, // Invalid Nonce or Invalid Credentials
                 '104': InvalidNonce, // Cannot perform request - nonce must be higher than 1520307203724237
+                'Order could not be cancelled.': OrderNotFound, // non-existent order
+                'Incorrect OID (non-existent or does not belong to user)': OrderNotFound, // ?
+                'Order price must be positive.': InvalidOrder, // on price <= 0
+                'Could not find a key matching the given X-BFX-APIKEY.': AuthenticationError,
+                'This API key does not have permission for this action': AuthenticationError, // authenticated but not authorized
+                'Precio incorrecto"': InvalidOrder, // on isNaN (price)
+                'Key amount should be a decimal number, e.g. "123.456"': InvalidOrder, // on isNaN (amount)
+                'ERR_RATE_LIMIT': DDoSProtection,
+                'Cannot perform request - nonce must be higher than': InvalidNonce
             },
         });
     }
@@ -268,7 +277,11 @@ module.exports = class bitso extends Exchange {
 
     async fetchMyTrades (symbol = undefined, since = undefined, limit = 25, params = {}) {
         await this.loadMarkets ();
-        const market = this.market (symbol);
+        let market;
+        //API accepts empty book parameter for this call
+        if (symbol) {
+            market = this.market (symbol);
+        }
         // the don't support fetching trades starting from a date yet
         // use the `marker` extra param for that
         // this is not a typo, the variable name is 'marker' (don't confuse with 'market')
@@ -285,11 +298,13 @@ module.exports = class bitso extends Exchange {
             });
         }
         const request = {
-            'book': market['id'],
             'limit': limit, // default = 25, max = 100
             // 'sort': 'desc', // default = desc
             // 'marker': id, // integer id to start from
         };
+        if (market) {
+            request['book'] = market['id'];
+        }
         const response = await this.privateGetUserTrades (this.extend (request, params));
         return this.parseTrades (response['payload'], market, since, limit);
     }
@@ -378,6 +393,50 @@ module.exports = class bitso extends Exchange {
             'status': status,
             'fee': undefined,
         };
+    }
+
+    async fetchFundings (params = {}) {
+      await this.loadMarkets ();
+      let response = await this.privateGetFundings(this.extend ({limit:100}, params));
+
+      let fundings = response['payload'];
+
+      let formattedFundings = [];
+      if (fundings) {
+        for (let funding of fundings) {
+            let currency = funding.currency.toUpperCase();
+            formattedFundings.push({
+              'id': funding.fid,
+              'currency': currency,
+              'amount': funding.amount,
+              'datetime': this.iso8601(this.parseDate (funding.created_at)),
+              'info': funding
+            });
+        }
+      }
+      return formattedFundings;
+    }
+
+    async fetchWithdrawals (params = {}) {
+      await this.loadMarkets ();
+      let response = await this.privateGetWithdrawals(this.extend ({limit:100}, params));
+
+      let withdrawals = response['payload'];
+
+      let formattedWithdrawals = [];
+      if (withdrawals) {
+        for (let withdrawal of withdrawals) {
+            let currency = withdrawal.currency.toUpperCase();
+            formattedWithdrawals.push({
+              'id': withdrawal.wid,
+              'currency': currency,
+              'amount': withdrawal.amount,
+              'datetime': this.iso8601(this.parseDate (withdrawal.created_at)),
+              'info': withdrawal
+            });
+        }
+      }
+      return formattedWithdrawals;
     }
 
     async fetchOpenOrders (symbol = undefined, since = undefined, limit = 25, params = {}) {
